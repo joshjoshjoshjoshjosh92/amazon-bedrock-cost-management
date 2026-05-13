@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cross-account IAM role for Bedrock Cost Tracker.
+  Grants member accounts read access to the central S3 bucket containing CUR data.
+  Deploy this template in each member account that needs access to centralized cost data.
+
+# -------------------------------------------------------------------
+# This template creates an IAM role in a member account that allows
+# the management/delegated admin account to assume it for reading
+# CUR data from the central S3 bucket. It also allows the member
+# account's own principals to read from the central bucket.
+#
+# Usage:
+#   Deploy in each member account with:
+#     - OrganizationId: Your AWS Organizations ID (e.g., o-abc123def4)
+#     - CentralBucketArn: ARN of the central S3 bucket holding CUR data
+#     - ManagementAccountId: The account ID of the management/delegated admin account
+# -------------------------------------------------------------------
+
+Parameters:
+  OrganizationId:
+    Type: String
+    Description: >
+      AWS Organizations ID used to scope the trust policy.
+      Only principals from accounts within this organization can assume the role.
+    AllowedPattern: '^o-[a-z0-9]{10,32}$'
+    ConstraintDescription: Must be a valid AWS Organizations ID (e.g., o-abc123def4)
+
+  CentralBucketArn:
+    Type: String
+    Description: >
+      ARN of the central S3 bucket containing CUR data.
+      The role grants read access to this bucket and its objects.
+    AllowedPattern: '^arn:aws:s3:::[a-zA-Z0-9.\-]+$'
+    ConstraintDescription: Must be a valid S3 bucket ARN (e.g., arn:aws:s3:::my-cur-bucket)
+
+  ManagementAccountId:
+    Type: String
+    Description: >
+      AWS account ID of the management or delegated administrator account
+      that will assume this role to read CUR data on behalf of the member account.
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account ID
+
+  ResourcePrefix:
+    Type: String
+    Default: bedrock-cost-tracker
+    Description: Prefix for resource naming
+    AllowedPattern: '^[a-zA-Z0-9\-]+$'
+    MaxLength: 30
+
+Resources:
+  CrossAccountCURReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-cur-read-role'
+      Description: >
+        Allows the management/delegated admin account to assume this role
+        for reading CUR data from the central S3 bucket. Scoped to the
+        AWS Organization for security.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowManagementAccountAssume
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ManagementAccountId}:root'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+      Policies:
+        - PolicyName: !Sub '${ResourcePrefix}-cur-read-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowS3BucketListing
+                Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: !Ref CentralBucketArn
+              - Sid: AllowS3ObjectRead
+                Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                Resource: !Sub '${CentralBucketArn}/*'
+              - Sid: AllowAthenaQueryExecution
+                Effect: Allow
+                Action:
+                  - 'athena:GetQueryExecution'
+                  - 'athena:GetQueryResults'
+                  - 'athena:StartQueryExecution'
+                  - 'athena:StopQueryExecution'
+                Resource: '*'
+              - Sid: AllowGlueCatalogRead
+                Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetDatabases'
+                  - 'glue:GetTable'
+                  - 'glue:GetTables'
+                  - 'glue:GetPartition'
+                  - 'glue:GetPartitions'
+                Resource: '*'
+      Tags:
+        - Key: 'bedrock-cost-tracker:managed'
+          Value: 'true'
+        - Key: 'bedrock-cost-tracker:purpose'
+          Value: 'cross-account-cur-read'
+
+Outputs:
+  RoleArn:
+    Description: ARN of the cross-account CUR read role
+    Value: !GetAtt CrossAccountCURReadRole.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-cur-read-role-arn'
+
+  RoleName:
+    Description: Name of the cross-account CUR read role
+    Value: !Ref CrossAccountCURReadRole

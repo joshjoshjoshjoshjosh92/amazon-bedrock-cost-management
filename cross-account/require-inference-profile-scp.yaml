@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Service Control Policy (SCP) that requires all Bedrock model invocations
+  to use an Application Inference Profile. This prevents direct model calls
+  that bypass tag-scoped enforcement in the Cost Sentry.
+
+# -------------------------------------------------------------------
+# PURPOSE:
+# When using tag-scoped enforcement (Tier 5 Cost Sentry), the deny policy
+# is scoped to specific Inference Profile ARNs. However, direct
+# bedrock:InvokeModel calls without an Inference Profile bypass this
+# enforcement entirely.
+#
+# This SCP closes that gap by denying all direct Bedrock model invocations
+# (calls to foundation-model/* resources) when no Inference Profile ARN
+# is present in the request context. Calls routed through an Inference
+# Profile are allowed to proceed normally.
+#
+# DEPLOYMENT:
+# - Deploy this template in the AWS Organizations management account
+#   (or delegated administrator account)
+# - Attach the resulting SCP to the OUs or accounts where tag-scoped
+#   enforcement is active
+# - This SCP is REQUIRED for tag-scoped enforcement mode to be effective
+# - It is NOT needed for account-wide enforcement mode
+#
+# IMPACT:
+# - All Bedrock InvokeModel, InvokeModelWithResponseStream, Converse,
+#   and ConverseStream calls MUST use an Inference Profile
+# - Direct model calls (without a profile) will be denied
+# - This does NOT affect other Bedrock actions (ListModels, GetModel, etc.)
+# - This does NOT affect calls that already use an Inference Profile
+# -------------------------------------------------------------------
+
+Parameters:
+  TargetIds:
+    Type: CommaDelimitedList
+    Description: >
+      List of AWS Organizations OU IDs or account IDs to attach this SCP to.
+      Example: ou-abc1-23456789, 123456789012
+
+  ResourcePrefix:
+    Type: String
+    Default: bedrock-cost-tracker
+    Description: Prefix for resource naming
+    AllowedPattern: '^[a-zA-Z0-9\-]+$'
+    MaxLength: 30
+
+Resources:
+  RequireInferenceProfileSCP:
+    Type: AWS::Organizations::Policy
+    Properties:
+      Name: !Sub '${ResourcePrefix}-require-inference-profile'
+      Description: >
+        Denies direct Bedrock model invocations that do not use an Inference Profile.
+        Required for tag-scoped enforcement to prevent bypass via untagged direct calls.
+      Type: SERVICE_CONTROL_POLICY
+      TargetIds: !Ref TargetIds
+      Content:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RequireInferenceProfile
+            Effect: Deny
+            Action:
+              - 'bedrock:InvokeModel'
+              - 'bedrock:InvokeModelWithResponseStream'
+              - 'bedrock:Converse'
+              - 'bedrock:ConverseStream'
+            Resource: 'arn:aws:bedrock:*:*:foundation-model/*'
+            Condition:
+              'Null':
+                'bedrock:InferenceProfileArn': 'true'
+      Tags:
+        - Key: 'bedrock-cost-tracker:managed'
+          Value: 'true'
+        - Key: 'bedrock-cost-tracker:purpose'
+          Value: 'require-inference-profile'
+
+Outputs:
+  SCPId:
+    Description: ID of the require-inference-profile SCP
+    Value: !Ref RequireInferenceProfileSCP
+
+  SCPArn:
+    Description: ARN of the require-inference-profile SCP
+    Value: !GetAtt RequireInferenceProfileSCP.Arn

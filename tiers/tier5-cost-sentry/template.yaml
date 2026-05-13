@@ -1,0 +1,1054 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Bedrock Cost Tracker - Tier 5: Cost Sentry
+  Proactive cost governance system that monitors Bedrock spend against budgets
+  and enforces configurable actions (notify, throttle, shutoff).
+
+# ------------------------------------------------------------------------------
+# Globals
+# ------------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    MemorySize: 256
+    Timeout: 30
+    Environment:
+      Variables:
+        RESOURCE_PREFIX: !Ref ResourcePrefix
+        BUDGETS_TABLE: !Sub ${ResourcePrefix}-budgets
+        SPEND_HISTORY_TABLE: !Sub ${ResourcePrefix}-spend-history
+        EVALUATION_LOCKS_TABLE: !Sub ${ResourcePrefix}-evaluation-locks
+        AUDIT_LOG_TABLE: !Sub ${ResourcePrefix}-audit-log
+        TEAM_NOTIFICATIONS_TOPIC_ARN: !Ref TeamNotificationsTopic
+        FINOPS_ALERTS_TOPIC_ARN: !Ref FinOpsAlertsTopic
+    Tags:
+      Environment: !Ref EnvironmentName
+      Application: bedrock-cost-tracker
+      Tier: '5'
+      Component: cost-sentry
+
+# ------------------------------------------------------------------------------
+# Parameters
+# ------------------------------------------------------------------------------
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: bct
+    Description: Prefix for all resource names to avoid collisions
+    MaxLength: 10
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+
+  EvaluationSchedule:
+    Type: String
+    Default: rate(5 minutes)
+    Description: >
+      Schedule expression for the Cost Sentry evaluation cycle.
+      Examples: rate(5 minutes), rate(15 minutes), rate(1 hour)
+
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of a customer-managed KMS key for encryption. Required when
+      EncryptionMode is set to customer-cmk. Leave empty for AWS-managed keys.
+
+  EncryptionMode:
+    Type: String
+    Default: aws-managed
+    AllowedValues:
+      - aws-managed
+      - customer-cmk
+    Description: >
+      Encryption mode for DynamoDB tables and SNS topics.
+      aws-managed uses default service encryption at no extra cost.
+      customer-cmk requires providing a KMS key ARN.
+
+  RequireMFAForRestore:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Whether to require MFA for the restore access endpoint
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for operational notifications
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    Description: Environment name for resource tagging and identification
+    AllowedValues:
+      - production
+      - staging
+      - development
+
+# ------------------------------------------------------------------------------
+# Conditions
+# ------------------------------------------------------------------------------
+Conditions:
+  UseCustomerManagedKey: !Equals [!Ref EncryptionMode, 'customer-cmk']
+
+# ------------------------------------------------------------------------------
+# Resources
+# ------------------------------------------------------------------------------
+Resources:
+
+  # ============================================================================
+  # DynamoDB Tables
+  # ============================================================================
+
+  BudgetsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ${ResourcePrefix}-budgets
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: !If
+          - UseCustomerManagedKey
+          - KMS
+          - !Ref AWS::NoValue
+        KMSMasterKeyId: !If
+          - UseCustomerManagedKey
+          - !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  SpendHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ResourcePrefix}-spend-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: !If
+          - UseCustomerManagedKey
+          - KMS
+          - !Ref AWS::NoValue
+        KMSMasterKeyId: !If
+          - UseCustomerManagedKey
+          - !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  EvaluationLocksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ResourcePrefix}-evaluation-locks
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: !If
+          - UseCustomerManagedKey
+          - KMS
+          - !Ref AWS::NoValue
+        KMSMasterKeyId: !If
+          - UseCustomerManagedKey
+          - !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  AuditLogTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub ${ResourcePrefix}-audit-log
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: action_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: action_type
+              KeyType: HASH
+            - AttributeName: SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: !If
+          - UseCustomerManagedKey
+          - KMS
+          - !Ref AWS::NoValue
+        KMSMasterKeyId: !If
+          - UseCustomerManagedKey
+          - !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  # ============================================================================
+  # SNS Topics
+  # ============================================================================
+
+  TeamNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ResourcePrefix}-team-notifications
+      KmsMasterKeyId: !If
+        - UseCustomerManagedKey
+        - !Ref KmsKeyArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  TeamNotificationsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref TeamNotificationsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  FinOpsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ResourcePrefix}-finops-alerts
+      KmsMasterKeyId: !If
+        - UseCustomerManagedKey
+        - !Ref KmsKeyArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: bedrock-cost-tracker
+        - Key: Tier
+          Value: '5'
+        - Key: Component
+          Value: cost-sentry
+
+  FinOpsAlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref FinOpsAlertsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ============================================================================
+  # Lambda Functions
+  # ============================================================================
+
+  SpendEvaluatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-spend-evaluator
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/spend_evaluator/
+      Description: Evaluates current spend against budget thresholds
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BudgetsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpendHistoryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EvaluationLocksTable
+        - CloudWatchPutMetricPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:GetMetricData
+                - cloudwatch:GetMetricStatistics
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetQueryResults
+              Resource: '*'
+
+  EnforcementHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-enforcement-handler
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/enforcement_handler/
+      Description: Applies IAM deny policies or SCPs for cost enforcement
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - iam:PutRolePolicy
+                - iam:DeleteRolePolicy
+                - iam:SimulatePrincipalPolicy
+                - iam:ListRoleTags
+                - iam:ListRoles
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - organizations:CreatePolicy
+                - organizations:AttachPolicy
+                - organizations:DetachPolicy
+                - organizations:DeletePolicy
+                - organizations:ListPolicies
+              Resource: '*'
+
+  NotificationSenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-notification-sender
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/notification_sender/
+      Description: Sends formatted alerts to SNS topics
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt TeamNotificationsTopic.TopicName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt FinOpsAlertsTopic.TopicName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogTable
+
+  BudgetApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-budget-api
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/budget_api/
+      Description: API handler for budget CRUD and spend queries
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BudgetsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpendHistoryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogTable
+      Events:
+        PostBudgets:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /budgets
+            Method: POST
+        DeleteBudget:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /budgets/{budget_id}
+            Method: DELETE
+        GetTeamBudgets:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /budgets/{team_id}
+            Method: GET
+        GetTeamSpend:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /spend/{team_id}
+            Method: GET
+        GetAudit:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /audit
+            Method: GET
+
+  RestoreAccessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-restore-access
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/restore_access/
+      Description: Restores Bedrock access by removing deny policies
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - iam:DeleteRolePolicy
+                - iam:ListRoleTags
+                - iam:ListRoles
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - organizations:DetachPolicy
+                - organizations:DeletePolicy
+                - organizations:ListPolicies
+              Resource: '*'
+      Events:
+        PostRestore:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CostSentryApi
+            Path: /restore/{account_id}
+            Method: POST
+
+  ReconciliationHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-reconciliation-handler
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/reconciliation_handler/
+      Description: Daily CUR vs CloudWatch spend reconciliation
+      Timeout: 300
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SpendHistoryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BudgetsTable
+        - CloudWatchPutMetricPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetQueryResults
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:GetBucketLocation
+              Resource: '*'
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Description: Daily reconciliation at 2 AM UTC
+            Enabled: true
+
+  PricingRefreshFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}-pricing-refresh
+      Handler: handler.lambda_handler
+      CodeUri: ../../functions/pricing_refresh/
+      Description: Weekly refresh of Bedrock pricing from AWS Pricing API
+      Timeout: 120
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - pricing:GetProducts
+                - pricing:DescribeServices
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:ListBucket
+              Resource: '*'
+      Events:
+        WeeklySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 ? * MON *)
+            Description: Weekly pricing refresh every Monday at 6 AM UTC
+            Enabled: true
+
+  # ============================================================================
+  # Step Functions State Machine
+  # ============================================================================
+
+  CostSentryStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${ResourcePrefix}-cost-sentry
+      Type: EXPRESS
+      Definition:
+        Comment: Bedrock Cost Sentry - Evaluates spend and enforces budget limits
+        StartAt: FetchBudgets
+        States:
+          FetchBudgets:
+            Type: Task
+            Resource: "${SpendEvaluatorFunctionArn}"
+            Parameters:
+              action: fetch_budgets
+              execution_id.$: $$.Execution.Id
+            ResultPath: $.budgets
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            Next: EvaluateAccounts
+          EvaluateAccounts:
+            Type: Task
+            Resource: "${SpendEvaluatorFunctionArn}"
+            Parameters:
+              action: evaluate_accounts
+              budgets.$: $.budgets
+              execution_id.$: $$.Execution.Id
+            ResultPath: $.evaluations
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            Next: CheckThresholds
+          CheckThresholds:
+            Type: Choice
+            Choices:
+              - Variable: $.evaluations.action
+                StringEquals: shutoff
+                Next: Shutoff
+              - Variable: $.evaluations.action
+                StringEquals: throttle
+                Next: Throttle
+              - Variable: $.evaluations.action
+                StringEquals: warn
+                Next: SendWarning
+            Default: NoAction
+          NoAction:
+            Type: Succeed
+          SendWarning:
+            Type: Task
+            Resource: "${NotificationSenderFunctionArn}"
+            Parameters:
+              action: send_warning
+              evaluations.$: $.evaluations
+            ResultPath: $.notification_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            End: true
+          Throttle:
+            Type: Task
+            Resource: "${EnforcementHandlerFunctionArn}"
+            Parameters:
+              action: throttle
+              evaluations.$: $.evaluations
+            ResultPath: $.enforcement_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            Next: NotifyThrottle
+          NotifyThrottle:
+            Type: Task
+            Resource: "${NotificationSenderFunctionArn}"
+            Parameters:
+              action: send_throttle
+              evaluations.$: $.evaluations
+              enforcement_result.$: $.enforcement_result
+            ResultPath: $.notification_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            End: true
+          Shutoff:
+            Type: Task
+            Resource: "${EnforcementHandlerFunctionArn}"
+            Parameters:
+              action: shutoff
+              evaluations.$: $.evaluations
+            ResultPath: $.enforcement_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            Next: VerifyEnforcement
+          VerifyEnforcement:
+            Type: Task
+            Resource: "${EnforcementHandlerFunctionArn}"
+            Parameters:
+              action: verify
+              enforcement_result.$: $.enforcement_result
+            ResultPath: $.verification_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            Next: NotifyShutoff
+          NotifyShutoff:
+            Type: Task
+            Resource: "${NotificationSenderFunctionArn}"
+            Parameters:
+              action: send_shutoff
+              evaluations.$: $.evaluations
+              enforcement_result.$: $.enforcement_result
+              verification_result.$: $.verification_result
+            ResultPath: $.notification_result
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleFailure
+                ResultPath: $.error
+            End: true
+          HandleFailure:
+            Type: Parallel
+            Branches:
+              - StartAt: LogFailureToAudit
+                States:
+                  LogFailureToAudit:
+                    Type: Task
+                    Resource: "${NotificationSenderFunctionArn}"
+                    Parameters:
+                      action: log_failure
+                      error.$: $.error
+                      execution_id.$: $$.Execution.Id
+                    End: true
+              - StartAt: NotifyFinOps
+                States:
+                  NotifyFinOps:
+                    Type: Task
+                    Resource: "${NotificationSenderFunctionArn}"
+                    Parameters:
+                      action: notify_failure
+                      error.$: $.error
+                      execution_id.$: $$.Execution.Id
+                    End: true
+            End: true
+      DefinitionSubstitutions:
+        SpendEvaluatorFunctionArn: !GetAtt SpendEvaluatorFunction.Arn
+        EnforcementHandlerFunctionArn: !GetAtt EnforcementHandlerFunction.Arn
+        NotificationSenderFunctionArn: !GetAtt NotificationSenderFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SpendEvaluatorFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref EnforcementHandlerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NotificationSenderFunction
+        - CloudWatchLogsFullAccess
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: bedrock-cost-tracker
+        Tier: '5'
+        Component: cost-sentry
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/stepfunctions/${ResourcePrefix}-cost-sentry
+      RetentionInDays: 30
+
+  # ============================================================================
+  # EventBridge Rules
+  # ============================================================================
+
+  ScheduledEvaluationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ResourcePrefix}-scheduled-evaluation
+      Description: Triggers Cost Sentry evaluation on a configurable schedule
+      ScheduleExpression: !Ref EvaluationSchedule
+      State: ENABLED
+      Targets:
+        - Id: CostSentryStateMachine
+          Arn: !GetAtt CostSentryStateMachine.Arn
+          RoleArn: !GetAtt EventBridgeStateMachineRole.Arn
+          Input: '{"trigger": "scheduled"}'
+
+  FastPathAlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ResourcePrefix}-fast-path-trigger
+      Description: Triggers immediate evaluation when CloudWatch Alarms fire
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+        detail:
+          state:
+            value:
+              - ALARM
+          alarmName:
+            - prefix: !Sub ${ResourcePrefix}
+      State: ENABLED
+      Targets:
+        - Id: CostSentryStateMachine
+          Arn: !GetAtt CostSentryStateMachine.Arn
+          RoleArn: !GetAtt EventBridgeStateMachineRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              alarmName: $.detail.alarmName
+              accountId: $.account
+            InputTemplate: '{"trigger": "fast-path", "alarm_name": "<alarmName>", "account_id": "<accountId>"}'
+
+  EventBridgeStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ResourcePrefix}-eventbridge-sfn-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeStateMachine
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !GetAtt CostSentryStateMachine.Arn
+
+  # ============================================================================
+  # API Gateway
+  # ============================================================================
+
+  CostSentryApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      Description: Bedrock Cost Sentry API
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        EnableIamAuthorizer: true
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - DELETE
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Amz-Date
+          - X-Amz-Security-Token
+      Tags:
+        Environment: !Ref EnvironmentName
+        Application: bedrock-cost-tracker
+        Tier: '5'
+        Component: cost-sentry
+        bedrock-cost-sentry:admin-access: required
+
+  # ============================================================================
+  # IAM Policies for API Access
+  # ============================================================================
+
+  BedrockCostSentryAdminPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ResourcePrefix}-BedrockCostSentryAdmin
+      Description: Full access to Bedrock Cost Sentry API - budgets, restore, audit
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AdminApiAccess
+            Effect: Allow
+            Action:
+              - execute-api:Invoke
+            Resource:
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/POST/budgets
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/DELETE/budgets/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/budgets/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/spend/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/POST/restore/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/audit
+            Condition:
+              StringEquals:
+                aws:ResourceTag/bedrock-cost-sentry:admin-access: required
+
+  BedrockCostSentryReaderPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ResourcePrefix}-BedrockCostSentryReader
+      Description: Read-only access to Bedrock Cost Sentry API - view budgets, spend, audit
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReaderApiAccess
+            Effect: Allow
+            Action:
+              - execute-api:Invoke
+            Resource:
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/budgets/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/spend/*
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CostSentryApi}/prod/GET/audit
+
+  # ============================================================================
+  # API Gateway Throttling Configuration
+  # ============================================================================
+
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: CostSentryApi
+    Properties:
+      UsagePlanName: !Sub ${ResourcePrefix}-default-usage-plan
+      Description: Default usage plan for Cost Sentry API
+      Throttle:
+        RateLimit: 10
+        BurstLimit: 20
+      Quota:
+        Limit: 1000
+        Period: DAY
+
+# ------------------------------------------------------------------------------
+# Outputs
+# ------------------------------------------------------------------------------
+Outputs:
+  BudgetsTableName:
+    Description: Name of the DynamoDB budgets table
+    Value: !Ref BudgetsTable
+
+  BudgetsTableArn:
+    Description: ARN of the DynamoDB budgets table
+    Value: !GetAtt BudgetsTable.Arn
+
+  SpendHistoryTableName:
+    Description: Name of the DynamoDB spend history table
+    Value: !Ref SpendHistoryTable
+
+  SpendHistoryTableArn:
+    Description: ARN of the DynamoDB spend history table
+    Value: !GetAtt SpendHistoryTable.Arn
+
+  EvaluationLocksTableName:
+    Description: Name of the DynamoDB evaluation locks table
+    Value: !Ref EvaluationLocksTable
+
+  EvaluationLocksTableArn:
+    Description: ARN of the DynamoDB evaluation locks table
+    Value: !GetAtt EvaluationLocksTable.Arn
+
+  AuditLogTableName:
+    Description: Name of the DynamoDB audit log table
+    Value: !Ref AuditLogTable
+
+  AuditLogTableArn:
+    Description: ARN of the DynamoDB audit log table
+    Value: !GetAtt AuditLogTable.Arn
+
+  AuditLogGSI1Name:
+    Description: Name of the audit log GSI1 index
+    Value: GSI1
+
+  TeamNotificationsTopicArn:
+    Description: ARN of the team notifications SNS topic
+    Value: !Ref TeamNotificationsTopic
+
+  FinOpsAlertsTopicArn:
+    Description: ARN of the FinOps alerts SNS topic
+    Value: !Ref FinOpsAlertsTopic
+
+  CostSentryStateMachineArn:
+    Description: ARN of the Cost Sentry Step Functions state machine
+    Value: !GetAtt CostSentryStateMachine.Arn
+
+  CostSentryApiUrl:
+    Description: URL of the Cost Sentry API Gateway
+    Value: !Sub https://${CostSentryApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+
+  CostSentryApiId:
+    Description: ID of the Cost Sentry API Gateway
+    Value: !Ref CostSentryApi
+
+  SpendEvaluatorFunctionArn:
+    Description: ARN of the spend evaluator Lambda function
+    Value: !GetAtt SpendEvaluatorFunction.Arn
+
+  EnforcementHandlerFunctionArn:
+    Description: ARN of the enforcement handler Lambda function
+    Value: !GetAtt EnforcementHandlerFunction.Arn
+
+  NotificationSenderFunctionArn:
+    Description: ARN of the notification sender Lambda function
+    Value: !GetAtt NotificationSenderFunction.Arn
+
+  BudgetApiFunctionArn:
+    Description: ARN of the budget API Lambda function
+    Value: !GetAtt BudgetApiFunction.Arn
+
+  RestoreAccessFunctionArn:
+    Description: ARN of the restore access Lambda function
+    Value: !GetAtt RestoreAccessFunction.Arn
+
+  ReconciliationHandlerFunctionArn:
+    Description: ARN of the reconciliation handler Lambda function
+    Value: !GetAtt ReconciliationHandlerFunction.Arn
+
+  PricingRefreshFunctionArn:
+    Description: ARN of the pricing refresh Lambda function
+    Value: !GetAtt PricingRefreshFunction.Arn
+
+  BedrockCostSentryAdminPolicyArn:
+    Description: ARN of the admin IAM policy for API access
+    Value: !Ref BedrockCostSentryAdminPolicy
+
+  BedrockCostSentryReaderPolicyArn:
+    Description: ARN of the reader IAM policy for API access
+    Value: !Ref BedrockCostSentryReaderPolicy

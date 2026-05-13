@@ -1,0 +1,48 @@
+%% Tier 2: Application Inference Profiles and Cost Allocation Tags
+%% No deployed infrastructure — Bedrock Inference Profiles + Billing tag activation
+
+graph TB
+    subgraph "Customer Workloads"
+        APP_A[App A: Chatbot<br/>Team: ml-platform]
+        APP_B[App B: Summarizer<br/>Team: customer-support]
+        APP_C[App C: Code Assistant<br/>Team: engineering]
+    end
+
+    subgraph "Application Inference Profiles"
+        AIP_A[ml-platform-chatbot-claude-sonnet<br/>Tags: Team=ml-platform<br/>App=chatbot, Env=prod]
+        AIP_B[customer-support-summarizer-claude-haiku<br/>Tags: Team=customer-support<br/>App=summarizer, Env=prod]
+        AIP_C[engineering-code-assist-claude-sonnet<br/>Tags: Team=engineering<br/>App=code-assistant, Env=prod]
+    end
+
+    APP_A --> AIP_A
+    APP_B --> AIP_B
+    APP_C --> AIP_C
+
+    subgraph "Amazon Bedrock"
+        SONNET[Claude 3 Sonnet]
+        HAIKU[Claude 3 Haiku]
+    end
+
+    AIP_A --> SONNET
+    AIP_B --> HAIKU
+    AIP_C --> SONNET
+
+    subgraph "Cost Attribution (24-48h)"
+        CE[Cost Explorer<br/>Group by Tag: Team]
+        CUR[Cost & Usage Report<br/>resource_tags_user_team]
+        CAT[Cost Allocation Tags<br/>Application, Environment<br/>Team, CostCenter]
+    end
+
+    AIP_A -.->|"Tagged usage"| CAT
+    AIP_B -.->|"Tagged usage"| CAT
+    AIP_C -.->|"Tagged usage"| CAT
+    CAT --> CE
+    CAT --> CUR
+
+    subgraph "Optional: Tag-Scoped Enforcement (Tier 5)"
+        SCP[Require Inference Profile SCP<br/>Denies direct model calls]
+        ENFORCE[Cost Sentry Enforcement<br/>Scoped by ARN pattern:<br/>ml-platform-*]
+    end
+
+    SCP -.->|"Prevents bypass"| APP_A
+    ENFORCE -.->|"Shutoff by team"| AIP_A

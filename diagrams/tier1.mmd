@@ -1,0 +1,33 @@
+%% Tier 1: Cost Explorer, Budgets, and Anomaly Detection
+%% No deployed infrastructure — AWS native services configured via console/CLI
+
+graph TB
+    subgraph "Customer Workloads"
+        APP[Applications<br/>Lambda / ECS / EKS / EC2]
+    end
+
+    subgraph "Amazon Bedrock"
+        BR[Bedrock Runtime API]
+    end
+
+    APP --> BR
+
+    subgraph "Tier 1 — Native AWS Cost Tools"
+        CE[AWS Cost Explorer<br/>Visual spend breakdown<br/>by model and usage type]
+        BUD[AWS Budgets<br/>Monthly cost budget<br/>80% + 100% alerts]
+        AD[Cost Anomaly Detection<br/>ML-based anomaly alerts<br/>$10 threshold]
+    end
+
+    BR -.->|"Billing data<br/>(24-48h delay)"| CE
+    BR -.->|"Billing data<br/>(~4h check)"| BUD
+    BR -.->|"Billing data<br/>(~24h baseline)"| AD
+
+    subgraph "Notifications"
+        EMAIL[Email Alerts]
+        SNS_T1[SNS Topic<br/>Optional]
+    end
+
+    BUD -->|"Threshold breached"| EMAIL
+    AD -->|"Anomaly detected"| EMAIL
+    BUD -.-> SNS_T1
+    AD -.-> SNS_T1

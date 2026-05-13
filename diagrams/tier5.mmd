@@ -1,0 +1,87 @@
+%% Tier 5: Cost Sentry — Proactive Cost Governance
+%% SAM-deployed: Step Functions, Lambda, DynamoDB, API Gateway, SNS
+
+graph TB
+    subgraph "Triggers"
+        EB_SCHED[EventBridge Schedule<br/>Every 5 min configurable]
+        EB_FAST[Fast-Path Trigger<br/>CloudWatch Alarm → EventBridge]
+    end
+
+    subgraph "Tier 5 — Cost Sentry"
+        SF[Step Functions<br/>State Machine]
+
+        subgraph "Lambda Functions"
+            EVAL[spend_evaluator<br/>Query CW metrics<br/>Compare vs budgets]
+            ENFORCE[enforcement_handler<br/>Apply IAM deny / SCP<br/>Verify after apply]
+            NOTIFY[notification_sender<br/>Format + publish alerts]
+            RECON[reconciliation_handler<br/>Daily CUR vs CW drift]
+            PRICE[pricing_refresh<br/>Weekly pricing update]
+        end
+
+        subgraph "DynamoDB Tables"
+            DDB_BUD[budgets table<br/>Team allocations + config]
+            DDB_SPEND[spend-history table<br/>Daily + CURRENT_PERIOD]
+            DDB_LOCK[evaluation-locks table<br/>Deduplication]
+            DDB_AUDIT[audit-log table<br/>All enforcement actions]
+        end
+
+        subgraph "API Gateway"
+            API[REST API<br/>IAM Authorization]
+            EP_BUD[POST/DELETE /budgets<br/>Budget CRUD]
+            EP_SPEND[GET /spend/team_id<br/>Current spend query]
+            EP_RESTORE[POST /restore/account_id<br/>Restore access + MFA]
+            EP_AUDIT[GET /audit<br/>Enforcement history]
+        end
+
+        subgraph "API Lambda"
+            BUDGET_API[budget_api handler]
+            RESTORE_API[restore_access handler]
+        end
+
+        SNS_TEAM[Team SNS Topic<br/>Warning + shutoff alerts]
+        SNS_FINOPS[FinOps SNS Topic<br/>All enforcement events]
+    end
+
+    EB_SCHED --> SF
+    EB_FAST --> SF
+
+    SF -->|"1. Fetch budgets"| DDB_BUD
+    SF -->|"2. Evaluate spend"| EVAL
+    EVAL --> DDB_SPEND
+    SF -->|"3. Enforce"| ENFORCE
+    SF -->|"4. Notify"| NOTIFY
+    NOTIFY --> SNS_TEAM
+    NOTIFY --> SNS_FINOPS
+
+    ENFORCE -->|"Log action"| DDB_AUDIT
+    EVAL -->|"Acquire lock"| DDB_LOCK
+
+    API --> EP_BUD
+    API --> EP_SPEND
+    API --> EP_RESTORE
+    API --> EP_AUDIT
+    EP_BUD --> BUDGET_API
+    EP_SPEND --> BUDGET_API
+    EP_RESTORE --> RESTORE_API
+    EP_AUDIT --> BUDGET_API
+
+    BUDGET_API --> DDB_BUD
+    BUDGET_API --> DDB_SPEND
+    RESTORE_API --> DDB_AUDIT
+
+    subgraph "Enforcement Targets"
+        IAM_DENY[IAM Deny Policy<br/>Account-level or tag-scoped]
+        SCP_DENY[SCP Deny<br/>Organization-level]
+    end
+
+    ENFORCE -->|"Apply deny"| IAM_DENY
+    ENFORCE -.->|"Org mode"| SCP_DENY
+
+    subgraph "Data Sources"
+        CW[CloudWatch Metrics<br/>Tier 3 — Primary<br/>Near real-time]
+        CUR_ATH[CUR via Athena<br/>Tier 4 — Reconciliation<br/>8-24h lag]
+    end
+
+    EVAL -->|"Primary source"| CW
+    RECON -->|"Ground truth"| CUR_ATH
+    RECON -->|"Correct drift"| DDB_SPEND

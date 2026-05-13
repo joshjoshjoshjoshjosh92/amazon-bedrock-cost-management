@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Amazon Bedrock Cost Tracker - Root Orchestrator
+  A progressive, multi-tier cost tracking and governance solution for Amazon Bedrock.
+  Deploys optional nested stacks for Tier 3 (CloudWatch), Tier 4 (CUR Analytics),
+  and Tier 5 (Cost Sentry).
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: bedrock-cost-tracker
+    Description: Progressive cost tracking and governance for Amazon Bedrock
+    Author: AWS
+    SpdxLicenseId: Apache-2.0
+    ReadmeUrl: README.md
+    LicenseUrl: LICENSE
+    Labels:
+      - bedrock
+      - cost-tracking
+      - finops
+      - serverless
+
+# ------------------------------------------------------------------------------
+# Global settings shared across all resources
+# ------------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref EnvironmentName
+        RESOURCE_PREFIX: !Ref ResourcePrefix
+        LOG_LEVEL: INFO
+
+# ------------------------------------------------------------------------------
+# Parameters
+# ------------------------------------------------------------------------------
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    Description: Environment name (e.g., production, staging, development)
+    AllowedValues:
+      - production
+      - staging
+      - development
+
+  ResourcePrefix:
+    Type: String
+    Default: bct
+    Description: Prefix for all resource names to avoid collisions
+    MaxLength: 10
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for operational notifications
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+
+  OrganizationId:
+    Type: String
+    Default: ''
+    Description: AWS Organizations ID for multi-account deployments (e.g., o-abc123)
+
+  EnableTier3:
+    Type: String
+    Default: 'true'
+    Description: Deploy Tier 3 CloudWatch monitoring stack
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableTier4:
+    Type: String
+    Default: 'false'
+    Description: Deploy Tier 4 CUR analytics pipeline stack
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableTier5:
+    Type: String
+    Default: 'false'
+    Description: Deploy Tier 5 Cost Sentry proactive governance stack
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+# ------------------------------------------------------------------------------
+# Conditions
+# ------------------------------------------------------------------------------
+Conditions:
+  DeployTier3: !Equals [!Ref EnableTier3, 'true']
+  DeployTier4: !Equals [!Ref EnableTier4, 'true']
+  DeployTier5: !Equals [!Ref EnableTier5, 'true']
+
+# ------------------------------------------------------------------------------
+# Resources — Nested Stacks
+# ------------------------------------------------------------------------------
+Resources:
+  Tier3CloudWatchStack:
+    Type: AWS::Serverless::Application
+    Condition: DeployTier3
+    Properties:
+      Location: tiers/tier3-cloudwatch/template.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ResourcePrefix: !Ref ResourcePrefix
+        NotificationEmail: !Ref NotificationEmail
+
+  Tier4CURAnalyticsStack:
+    Type: AWS::Serverless::Application
+    Condition: DeployTier4
+    Properties:
+      Location: tiers/tier4-cur-analytics/template.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ResourcePrefix: !Ref ResourcePrefix
+        OrganizationId: !Ref OrganizationId
+
+  Tier5CostSentryStack:
+    Type: AWS::Serverless::Application
+    Condition: DeployTier5
+    Properties:
+      Location: tiers/tier5-cost-sentry/template.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        ResourcePrefix: !Ref ResourcePrefix
+        NotificationEmail: !Ref NotificationEmail
+
+# ------------------------------------------------------------------------------
+# Outputs
+# ------------------------------------------------------------------------------
+Outputs:
+  Tier3StackId:
+    Description: Tier 3 CloudWatch monitoring stack ARN
+    Value: !If [DeployTier3, !Ref Tier3CloudWatchStack, 'Not deployed']
+
+  Tier4StackId:
+    Description: Tier 4 CUR analytics pipeline stack ARN
+    Value: !If [DeployTier4, !Ref Tier4CURAnalyticsStack, 'Not deployed']
+
+  Tier5StackId:
+    Description: Tier 5 Cost Sentry governance stack ARN
+    Value: !If [DeployTier5, !Ref Tier5CostSentryStack, 'Not deployed']

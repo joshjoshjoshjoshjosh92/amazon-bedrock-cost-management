@@ -1,0 +1,91 @@
+# AWS SAM CLI Configuration
+# This is an example configuration file. Copy and modify for your environment.
+# See: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-config.html
+
+version = 0.1
+
+# ==============================================================================
+# Full Stack Deployment (Root Orchestrator)
+# Deploys all enabled tiers as nested stacks
+# ==============================================================================
+[default.deploy.parameters]
+stack_name = "bedrock-cost-tracker"
+resolve_s3 = true
+s3_prefix = "bedrock-cost-tracker"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = true
+parameter_overrides = [
+    "EnvironmentName=production",
+    "ResourcePrefix=bct",
+    "NotificationEmail=finops@example.com",
+    "EnableTier3=true",
+    "EnableTier4=true",
+    "EnableTier5=true",
+    "OrganizationId=o-exampleorgid",
+]
+
+[default.build.parameters]
+use_container = false
+parallel = true
+
+# ==============================================================================
+# Tier 3 — CloudWatch Monitoring (standalone deployment)
+# ==============================================================================
+[tier3.deploy.parameters]
+stack_name = "bedrock-cloudwatch"
+resolve_s3 = true
+s3_prefix = "bedrock-cost-tracker/tier3"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+template_file = "tiers/tier3-cloudwatch/template.yaml"
+parameter_overrides = [
+    "EnvironmentName=production",
+    "ResourcePrefix=bct",
+    "NotificationEmail=ops-team@example.com",
+    "MonitoredModels=all",
+    "TokenAlarmThreshold=1000000",
+    "AlarmEvaluationPeriod=300",
+]
+
+# ==============================================================================
+# Tier 4 — CUR Analytics Pipeline (standalone deployment)
+# ==============================================================================
+[tier4.deploy.parameters]
+stack_name = "bedrock-cur-analytics"
+resolve_s3 = true
+s3_prefix = "bedrock-cost-tracker/tier4"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+template_file = "tiers/tier4-cur-analytics/template.yaml"
+parameter_overrides = [
+    "EnvironmentName=production",
+    "ResourcePrefix=bct",
+    "OrganizationId=o-exampleorgid",
+    "CURBucketName=my-cur-bucket",
+    "EnableQuickSight=false",
+    "DataRetentionMonths=13",
+    "GlueCrawlerSchedule=cron(0 1 * * ? *)",
+]
+
+# ==============================================================================
+# Tier 5 — Cost Sentry (standalone deployment)
+# ==============================================================================
+[tier5.deploy.parameters]
+stack_name = "bedrock-cost-sentry"
+resolve_s3 = true
+s3_prefix = "bedrock-cost-tracker/tier5"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+template_file = "tiers/tier5-cost-sentry/template.yaml"
+parameter_overrides = [
+    "EnvironmentName=production",
+    "ResourcePrefix=bct",
+    "EvaluationSchedule=rate(5 minutes)",
+    "EncryptionMode=AWS_MANAGED",
+    "RequireMFAForRestore=false",
+    "NotificationEmail=finops@example.com",
+]

@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Lambda layer packaging the bedrock-cost-tracker SDK wrapper.
+  Provides per-request token-level cost tracking for Amazon Bedrock
+  invocations in Lambda functions without requiring pip install at deploy time.
+
+# -------------------------------------------------------------------
+# This template packages the bedrock_cost_tracker Python SDK as a
+# Lambda layer, making it available to Lambda functions via a layer ARN.
+#
+# Build and deploy:
+#   make build          # Installs SDK into layer structure
+#   sam build           # Builds the SAM template
+#   sam deploy --guided # Deploys the layer
+#
+# Usage in consuming Lambda functions:
+#   Layers:
+#     - !Ref BedrockCostTrackerLayerArn
+#
+# The layer installs the package into:
+#   python/lib/python3.12/site-packages/bedrock_cost_tracker/
+#
+# Compatible with Python 3.9, 3.10, 3.11, and 3.12 runtimes.
+# -------------------------------------------------------------------
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: bedrock-cost-tracker-layer
+    Description: Lambda layer for the bedrock-cost-tracker SDK wrapper
+    Author: AWS Solutions Library
+    SpdxLicenseId: Apache-2.0
+    Labels:
+      - bedrock
+      - cost-tracking
+      - lambda-layer
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: bedrock-cost-tracker
+    Description: Prefix for resource naming
+    AllowedPattern: '^[a-zA-Z0-9\-]+$'
+    MaxLength: 30
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  BedrockCostTrackerLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub '${ResourcePrefix}-sdk'
+      Description: >
+        Bedrock Cost Tracker SDK wrapper - provides per-request token-level
+        cost tracking for Amazon Bedrock invocations. Includes boto3 dependency.
+      ContentUri: ./build/layer/
+      CompatibleRuntimes:
+        - python3.9
+        - python3.10
+        - python3.11
+        - python3.12
+      CompatibleArchitectures:
+        - x86_64
+        - arm64
+      LicenseInfo: Apache-2.0
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: makefile
+
+Outputs:
+  LayerArn:
+    Description: ARN of the bedrock-cost-tracker Lambda layer
+    Value: !Ref BedrockCostTrackerLayer
+    Export:
+      Name: !Sub '${ResourcePrefix}-layer-arn'
+
+  LayerVersionArn:
+    Description: Version ARN of the bedrock-cost-tracker Lambda layer
+    Value: !Ref BedrockCostTrackerLayer

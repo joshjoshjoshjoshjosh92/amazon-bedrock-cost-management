@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Bedrock Cost Tracker - Tier 3: CloudWatch Monitoring
+  Extracts token-level metrics from Bedrock model invocation logs,
+  presents them in dashboards, and triggers configurable alarms.
+
+# ------------------------------------------------------------------------------
+# Parameters
+# ------------------------------------------------------------------------------
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: "production"
+    Description: Environment name for resource tagging and identification
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for alarm notifications
+
+  ResourcePrefix:
+    Type: String
+    Default: "bedrock-tracker"
+    Description: Prefix for resource names to avoid collisions
+
+  MonitoredModels:
+    Type: CommaDelimitedList
+    Default: "*"
+    Description: Comma-separated list of Bedrock model IDs to monitor (use * for all)
+
+  TokenAlarmThreshold:
+    Type: Number
+    Default: 1000000
+    Description: Token count threshold for triggering alarms (default 1M tokens)
+
+  AlarmEvaluationPeriod:
+    Type: Number
+    Default: 300
+    Description: Alarm evaluation period in seconds (default 5 minutes)
+
+# ------------------------------------------------------------------------------
+# Resources
+# ------------------------------------------------------------------------------
+Resources:
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Log Group for Bedrock Model Invocation Logs
+  # --------------------------------------------------------------------------
+  BedrockInvocationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/bedrock/${ResourcePrefix}-model-invocations"
+      RetentionInDays: 90
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref ResourcePrefix
+
+  # --------------------------------------------------------------------------
+  # Metric Filters — Extract metrics from Bedrock invocation logs
+  # --------------------------------------------------------------------------
+  InputTokenCountMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BedrockInvocationLogGroup
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.inputTokenCount = * }'
+      MetricTransformations:
+        - MetricNamespace: BedrockCostTracker
+          MetricName: InputTokenCount
+          MetricValue: $.inputTokenCount
+          Dimensions:
+            - Key: ModelId
+              Value: $.modelId
+            - Key: AccountId
+              Value: $.accountId
+
+  OutputTokenCountMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BedrockInvocationLogGroup
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.outputTokenCount = * }'
+      MetricTransformations:
+        - MetricNamespace: BedrockCostTracker
+          MetricName: OutputTokenCount
+          MetricValue: $.outputTokenCount
+          Dimensions:
+            - Key: ModelId
+              Value: $.modelId
+            - Key: AccountId
+              Value: $.accountId
+
+  InvocationCountMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BedrockInvocationLogGroup
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" }'
+      MetricTransformations:
+        - MetricNamespace: BedrockCostTracker
+          MetricName: InvocationCount
+          MetricValue: "1"
+
+  LatencyMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref BedrockInvocationLogGroup
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.latencyMs = * }'
+      MetricTransformations:
+        - MetricNamespace: BedrockCostTracker
+          MetricName: Latency
+          MetricValue: $.latencyMs
+          Dimensions:
+            - Key: ModelId
+              Value: $.modelId
+
+  # --------------------------------------------------------------------------
+  # SNS Topic for Alarm Notifications
+  # --------------------------------------------------------------------------
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ResourcePrefix}-alarm-notifications"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref ResourcePrefix
+
+  AlarmNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Alarms
+  # --------------------------------------------------------------------------
+  InputTokenThresholdAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ResourcePrefix}-input-token-threshold"
+      AlarmDescription: !Sub "Input token count exceeded ${TokenAlarmThreshold} within evaluation period"
+      Namespace: BedrockCostTracker
+      MetricName: InputTokenCount
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: 1
+      Threshold: !Ref TokenAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  OutputTokenThresholdAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ResourcePrefix}-output-token-threshold"
+      AlarmDescription: !Sub "Output token count exceeded ${TokenAlarmThreshold} within evaluation period"
+      Namespace: BedrockCostTracker
+      MetricName: OutputTokenCount
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: 1
+      Threshold: !Ref TokenAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Dashboard
+  # --------------------------------------------------------------------------
+  BedrockCostDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ResourcePrefix}-${EnvironmentName}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 1,
+              "properties": {
+                "markdown": "# Bedrock Cost Tracker — ${EnvironmentName}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 1,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["BedrockCostTracker", "InputTokenCount", {"stat": "Sum", "label": "Input Tokens"}],
+                  ["BedrockCostTracker", "OutputTokenCount", {"stat": "Sum", "label": "Output Tokens"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Token Consumption Over Time",
+                "period": 3600
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 1,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["BedrockCostTracker", "Latency", {"stat": "Average", "label": "Avg Latency (ms)"}],
+                  ["BedrockCostTracker", "Latency", {"stat": "p99", "label": "p99 Latency (ms)"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Latency Over Time",
+                "period": 3600
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 7,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "metrics": [
+                  ["BedrockCostTracker", "InputTokenCount", {"stat": "Sum", "label": "Input Tokens"}],
+                  ["BedrockCostTracker", "OutputTokenCount", {"stat": "Sum", "label": "Output Tokens"}]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Total Tokens (Last 24h)",
+                "period": 86400
+              }
+            },
+            {
+              "type": "metric",
+              "x": 6,
+              "y": 7,
+              "width": 6,
+              "height": 4,
+              "properties": {
+                "metrics": [
+                  ["BedrockCostTracker", "InvocationCount", {"stat": "Sum", "label": "Invocations"}]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Total Invocations (Last 24h)",
+                "period": 86400
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 4,
+              "properties": {
+                "metrics": [
+                  ["BedrockCostTracker", "InvocationCount", {"stat": "Sum", "label": "Invocations"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Invocation Count Over Time",
+                "period": 3600
+              }
+            }
+          ]
+        }
+
+# ------------------------------------------------------------------------------
+# Outputs
+# ------------------------------------------------------------------------------
+Outputs:
+  LogGroupName:
+    Description: CloudWatch Log Group for Bedrock model invocation logs
+    Value: !Ref BedrockInvocationLogGroup
+
+  LogGroupArn:
+    Description: ARN of the CloudWatch Log Group
+    Value: !GetAtt BedrockInvocationLogGroup.Arn
+
+  DashboardName:
+    Description: CloudWatch Dashboard name
+    Value: !Ref BedrockCostDashboard
+
+  AlarmTopicArn:
+    Description: SNS Topic ARN for alarm notifications
+    Value: !Ref AlarmNotificationTopic
+
+  InputTokenAlarmArn:
+    Description: ARN of the input token threshold alarm
+    Value: !GetAtt InputTokenThresholdAlarm.Arn
+
+  OutputTokenAlarmArn:
+    Description: ARN of the output token threshold alarm
+    Value: !GetAtt OutputTokenThresholdAlarm.Arn

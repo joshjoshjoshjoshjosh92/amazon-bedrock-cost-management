@@ -1,0 +1,59 @@
+%% Tier 4: CUR Analytics Pipeline
+%% SAM-deployed: S3, Glue, Athena, optional QuickSight
+
+graph TB
+    subgraph "AWS Billing"
+        CUR[Cost & Usage Report<br/>Hourly granularity<br/>Parquet format<br/>Resource-level detail]
+    end
+
+    subgraph "Tier 4 — CUR Analytics Pipeline"
+        S3[S3 Bucket<br/>Intelligent-Tiering<br/>13-month retention<br/>Partitioned: year/month/service]
+
+        GLUE_DB[Glue Database<br/>bedrock_cost_tracker]
+        GLUE_CR[Glue Crawler<br/>Daily schedule<br/>cron 0 1 * * ? *]
+
+        ATH_WG[Athena Workgroup<br/>bedrock-cost-tracker]
+
+        subgraph "Pre-built Queries"
+            Q1[bedrock_monthly_by_team.sql]
+            Q2[bedrock_daily_by_app.sql]
+            Q3[bedrock_by_model.sql]
+            Q4[bedrock_by_region.sql]
+            Q5[bedrock_by_account.sql]
+            Q6[bedrock_top_consumers.sql]
+            Q7[bedrock_yoy_comparison.sql]
+            Q8[bedrock_anomaly_detection.sql]
+        end
+
+        MISS[Missed Delivery Detection<br/>S3 event notification]
+        CWA_T4[CloudWatch Alarm<br/>No delivery within 1 hour]
+    end
+
+    CUR -->|"Hourly delivery"| S3
+    S3 --> GLUE_CR
+    GLUE_CR --> GLUE_DB
+    GLUE_DB --> ATH_WG
+    ATH_WG --> Q1
+    ATH_WG --> Q2
+    ATH_WG --> Q3
+    ATH_WG --> Q4
+    ATH_WG --> Q5
+    ATH_WG --> Q6
+    ATH_WG --> Q7
+    ATH_WG --> Q8
+    S3 --> MISS
+    MISS --> CWA_T4
+
+    subgraph "Optional: QuickSight"
+        QS_DS[QuickSight DataSource<br/>Connected to Athena]
+        QS_DASH[QuickSight Dashboard<br/>Chargeback visualizations]
+    end
+
+    ATH_WG -.->|"EnableQuickSight=true"| QS_DS
+    QS_DS -.-> QS_DASH
+
+    subgraph "Tier 5 Integration"
+        RECON[Reconciliation Handler<br/>Daily CUR vs CW comparison]
+    end
+
+    ATH_WG -.->|"Ground truth query"| RECON

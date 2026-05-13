@@ -1,0 +1,436 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Bedrock Cost Tracker - Tier 4: CUR Analytics Pipeline
+  Provisions Cost and Usage Report delivery, Glue catalog, Athena workgroup,
+  and optional QuickSight dashboard for Bedrock cost analytics.
+
+# ------------------------------------------------------------------------------
+# Parameters
+# ------------------------------------------------------------------------------
+Parameters:
+  OrganizationId:
+    Type: String
+    Description: AWS Organizations ID for multi-account aggregation (e.g., o-abc123)
+    Default: ''
+
+  CURBucketName:
+    Type: String
+    Description: Name for the S3 bucket storing CUR data (must be globally unique)
+
+  EnableQuickSight:
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'false'
+    Description: Whether to provision QuickSight DataSource, DataSet, and Dashboard
+
+  DataRetentionMonths:
+    Type: Number
+    Default: 13
+    Description: Number of months to retain CUR data before expiration
+    AllowedValues:
+      - 6
+      - 12
+      - 13
+      - 18
+      - 24
+
+  GlueCrawlerSchedule:
+    Type: String
+    Default: 'cron(0 1 * * ? *)'
+    Description: Glue Crawler schedule expression (default daily at 1 AM UTC)
+
+  EnvironmentName:
+    Type: String
+    Default: production
+    Description: Environment name for resource tagging
+    AllowedValues:
+      - production
+      - staging
+      - development
+
+  ResourcePrefix:
+    Type: String
+    Default: bct
+    Description: Prefix for all resource names to avoid collisions
+    MaxLength: 10
+    AllowedPattern: ^[a-z][a-z0-9-]*$
+
+# ------------------------------------------------------------------------------
+# Conditions
+# ------------------------------------------------------------------------------
+Conditions:
+  EnableQuickSightCondition: !Equals [!Ref EnableQuickSight, 'true']
+
+# ------------------------------------------------------------------------------
+# Resources
+# ------------------------------------------------------------------------------
+Resources:
+
+  # --------------------------------------------------------------------------
+  # S3 Bucket for CUR Data
+  # --------------------------------------------------------------------------
+  CURBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref CURBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: IntelligentTieringTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+          - Id: DataRetentionExpiration
+            Status: Enabled
+            ExpirationInDays: !FindInMap [RetentionDaysMap, !Ref DataRetentionMonths, Days]
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Component
+          Value: bedrock-cost-tracker-tier4
+
+  CURBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CURBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCURDelivery
+            Effect: Allow
+            Principal:
+              Service: billingreports.amazonaws.com
+            Action:
+              - s3:PutObject
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+            Resource:
+              - !Sub 'arn:aws:s3:::${CURBucket}'
+              - !Sub 'arn:aws:s3:::${CURBucket}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # --------------------------------------------------------------------------
+  # CUR Report Definition
+  # --------------------------------------------------------------------------
+  CURReportDefinition:
+    Type: AWS::CUR::ReportDefinition
+    DependsOn: CURBucketPolicy
+    Properties:
+      ReportName: !Sub '${ResourcePrefix}-bedrock-cur'
+      TimeUnit: HOURLY
+      Format: Parquet
+      Compression: Parquet
+      AdditionalSchemaElements:
+        - RESOURCES
+      S3Bucket: !Ref CURBucket
+      S3Prefix: !Sub '${ResourcePrefix}/cur-data'
+      S3Region: !Ref AWS::Region
+      RefreshClosedReports: true
+      ReportVersioning: OVERWRITE_REPORT
+      AdditionalArtifacts:
+        - ATHENA
+
+  # --------------------------------------------------------------------------
+  # Glue Database and Crawler
+  # --------------------------------------------------------------------------
+  CURGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ResourcePrefix}_cur_database'
+        Description: Glue database for Bedrock Cost and Usage Report data
+
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-glue-crawler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: CURBucketReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${CURBucket}'
+                  - !Sub 'arn:aws:s3:::${CURBucket}/*'
+
+  CURGlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}-cur-crawler'
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref CURGlueDatabase
+      Schedule:
+        ScheduleExpression: !Ref GlueCrawlerSchedule
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${CURBucket}/${ResourcePrefix}/cur-data/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      Configuration: >-
+        {"Version":1.0,"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"}},"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"}}
+      Tags:
+        Environment: !Ref EnvironmentName
+        Component: bedrock-cost-tracker-tier4
+
+  # --------------------------------------------------------------------------
+  # Athena Workgroup
+  # --------------------------------------------------------------------------
+  AthenaQueryResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${CURBucketName}-athena-results'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireQueryResults
+            Status: Enabled
+            ExpirationInDays: 7
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Component
+          Value: bedrock-cost-tracker-tier4
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ResourcePrefix}-bedrock-analytics'
+      Description: Athena workgroup for Bedrock CUR analytics queries
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaQueryResultsBucket}/query-results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Component
+          Value: bedrock-cost-tracker-tier4
+
+  # --------------------------------------------------------------------------
+  # Missed CUR Delivery Detection
+  # --------------------------------------------------------------------------
+  MissedDeliveryAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}-cur-missed-delivery'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  MissedDeliveryRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}-cur-delivery-monitor'
+      Description: Detects when CUR delivery has not occurred within expected window
+      ScheduleExpression: 'rate(12 hours)'
+      State: ENABLED
+      Targets:
+        - Id: MissedDeliveryCheck
+          Arn: !Ref MissedDeliveryAlarmTopic
+
+  MissedDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-cur-missed-delivery'
+      AlarmDescription: CUR delivery has not occurred within the expected 24-hour window
+      Namespace: AWS/S3
+      MetricName: NumberOfObjects
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref CURBucket
+        - Name: StorageType
+          Value: AllStorageTypes
+      Statistic: Average
+      Period: 86400
+      EvaluationPeriods: 1
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Threshold: 0
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref MissedDeliveryAlarmTopic
+
+  MissedDeliveryTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref MissedDeliveryAlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventsPublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref MissedDeliveryAlarmTopic
+
+  # --------------------------------------------------------------------------
+  # QuickSight Resources (Conditional)
+  # --------------------------------------------------------------------------
+  QuickSightDataSource:
+    Type: AWS::QuickSight::DataSource
+    Condition: EnableQuickSightCondition
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: !Sub '${ResourcePrefix}-bedrock-cur-datasource'
+      Name: !Sub '${ResourcePrefix}-bedrock-cur'
+      Type: ATHENA
+      DataSourceParameters:
+        AthenaParameters:
+          WorkGroup: !Ref AthenaWorkgroup
+
+  QuickSightDataSet:
+    Type: AWS::QuickSight::DataSet
+    Condition: EnableQuickSightCondition
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSetId: !Sub '${ResourcePrefix}-bedrock-usage-dataset'
+      Name: !Sub '${ResourcePrefix}-bedrock-usage'
+      ImportMode: SPICE
+      PhysicalTableMap:
+        BedrockUsageTable:
+          CustomSql:
+            DataSourceArn: !GetAtt QuickSightDataSource.Arn
+            Name: bedrock_usage
+            SqlQuery: !Sub |
+              SELECT
+                  line_item_usage_account_id AS account_id,
+                  line_item_usage_start_date AS usage_hour,
+                  product_region AS region,
+                  line_item_resource_id AS resource_id,
+                  line_item_operation AS operation,
+                  line_item_usage_type AS usage_type,
+                  line_item_unblended_cost AS unblended_cost_usd,
+                  COALESCE(line_item_net_unblended_cost, line_item_unblended_cost) AS effective_cost_usd,
+                  savings_plan_savings_plan_effective_cost AS sp_effective_cost_usd,
+                  resource_tags_user_team AS team,
+                  resource_tags_user_application AS application,
+                  resource_tags_user_environment AS environment
+              FROM ${ResourcePrefix}_cur_database.${ResourcePrefix}_bedrock_cur
+              WHERE line_item_product_code = 'AmazonBedrock'
+                AND line_item_line_item_type IN ('Usage', 'SavingsPlanCoveredUsage', 'SavingsPlanNegation', 'DiscountedUsage')
+            Columns:
+              - Name: account_id
+                Type: STRING
+              - Name: usage_hour
+                Type: DATETIME
+              - Name: region
+                Type: STRING
+              - Name: resource_id
+                Type: STRING
+              - Name: operation
+                Type: STRING
+              - Name: usage_type
+                Type: STRING
+              - Name: unblended_cost_usd
+                Type: DECIMAL
+              - Name: effective_cost_usd
+                Type: DECIMAL
+              - Name: sp_effective_cost_usd
+                Type: DECIMAL
+              - Name: team
+                Type: STRING
+              - Name: application
+                Type: STRING
+              - Name: environment
+                Type: STRING
+
+  QuickSightDashboard:
+    Type: AWS::QuickSight::Dashboard
+    Condition: EnableQuickSightCondition
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DashboardId: !Sub '${ResourcePrefix}-bedrock-cost-dashboard'
+      Name: !Sub '${ResourcePrefix} Bedrock Cost Dashboard'
+      SourceEntity:
+        SourceTemplate:
+          Arn: !Sub 'arn:aws:quicksight:${AWS::Region}:${AWS::AccountId}:template/${ResourcePrefix}-bedrock-cost-template'
+          DataSetReferences:
+            - DataSetPlaceholder: bedrock_usage
+              DataSetArn: !GetAtt QuickSightDataSet.Arn
+
+# ------------------------------------------------------------------------------
+# Mappings
+# ------------------------------------------------------------------------------
+Mappings:
+  RetentionDaysMap:
+    '6':
+      Days: 183
+    '12':
+      Days: 365
+    '13':
+      Days: 396
+    '18':
+      Days: 548
+    '24':
+      Days: 730
+
+# ------------------------------------------------------------------------------
+# Outputs
+# ------------------------------------------------------------------------------
+Outputs:
+  CURBucketArn:
+    Description: ARN of the S3 bucket storing CUR data
+    Value: !GetAtt CURBucket.Arn
+
+  GlueDatabaseName:
+    Description: Name of the Glue database for CUR data
+    Value: !Ref CURGlueDatabase
+
+  AthenaWorkgroupName:
+    Description: Name of the Athena workgroup for queries
+    Value: !Ref AthenaWorkgroup
+
+  MissedDeliveryAlarmArn:
+    Description: ARN of the missed CUR delivery alarm SNS topic
+    Value: !Ref MissedDeliveryAlarmTopic
+
+  QuickSightDashboardId:
+    Description: QuickSight Dashboard ID (if enabled)
+    Condition: EnableQuickSightCondition
+    Value: !Sub '${ResourcePrefix}-bedrock-cost-dashboard'

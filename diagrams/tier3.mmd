@@ -1,0 +1,58 @@
+%% Tier 3: CloudWatch Monitoring
+%% SAM-deployed: Log groups, metric filters, dashboards, alarms
+
+graph TB
+    subgraph "Customer Workloads"
+        APP[Applications + SDK Wrapper]
+    end
+
+    subgraph "Amazon Bedrock"
+        BR[Bedrock Runtime API]
+    end
+
+    APP -->|"invoke_model / converse"| BR
+
+    subgraph "Tier 3 — CloudWatch Monitoring Stack"
+        CWL[CloudWatch Log Group<br/>Model Invocation Logs]
+
+        subgraph "Metric Filters"
+            MF1[InputTokenCount<br/>$.inputTokenCount]
+            MF2[OutputTokenCount<br/>$.outputTokenCount]
+            MF3[InvocationCount<br/>count = 1 per entry]
+            MF4[Latency<br/>$.latencyMs]
+        end
+
+        CWM[Custom Metrics<br/>Namespace: BedrockCostTracker<br/>Dimensions: ModelId, AccountId]
+
+        CWD[CloudWatch Dashboard<br/>Token consumption over time<br/>Cost trends by model<br/>Invocation count]
+
+        CWA[CloudWatch Alarms<br/>Token threshold breach<br/>Configurable period]
+
+        SNS_T3[SNS Topic<br/>Alarm notifications]
+    end
+
+    BR -->|"Invocation logs"| CWL
+    CWL --> MF1
+    CWL --> MF2
+    CWL --> MF3
+    CWL --> MF4
+    MF1 --> CWM
+    MF2 --> CWM
+    MF3 --> CWM
+    MF4 --> CWM
+    CWM --> CWD
+    CWM --> CWA
+    CWA -->|"Threshold breached"| SNS_T3
+
+    subgraph "SDK Wrapper Metrics (Optional)"
+        SDK_CW[PutMetricData<br/>Per-request cost + tags<br/>EMF for high cardinality]
+    end
+
+    APP -.->|"Direct metric emission"| SDK_CW
+    SDK_CW -.-> CWM
+
+    subgraph "Tier 5 Integration"
+        FAST[Fast-Path Trigger<br/>EventBridge → Step Functions]
+    end
+
+    CWA -.->|"Alarm state change"| FAST
