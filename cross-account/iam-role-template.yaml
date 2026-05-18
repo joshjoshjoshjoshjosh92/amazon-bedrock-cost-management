@@ -93,7 +93,8 @@ Resources:
                   - 'athena:GetQueryResults'
                   - 'athena:StartQueryExecution'
                   - 'athena:StopQueryExecution'
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:athena:*:${AWS::AccountId}:workgroup/${ResourcePrefix}-*'
               - Sid: AllowGlueCatalogRead
                 Effect: Allow
                 Action:
@@ -103,7 +104,10 @@ Resources:
                   - 'glue:GetTables'
                   - 'glue:GetPartition'
                   - 'glue:GetPartitions'
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:glue:*:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:*:${AWS::AccountId}:database/${ResourcePrefix}*'
+                  - !Sub 'arn:aws:glue:*:${AWS::AccountId}:table/${ResourcePrefix}*/*'
       Tags:
         - Key: 'bedrock-cost-tracker:managed'
           Value: 'true'

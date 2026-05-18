@@ -341,17 +341,25 @@ Resources:
             TableName: !Ref EvaluationLocksTable
         - CloudWatchPutMetricPolicy: {}
         - Statement:
-            - Effect: Allow
+            # CloudWatch GetMetricData/Statistics does not support resource-level permissions
+            # See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazoncloudwatch.html
+            - Sid: CloudWatchReadMetrics
+              Effect: Allow
               Action:
                 - cloudwatch:GetMetricData
                 - cloudwatch:GetMetricStatistics
               Resource: '*'
-            - Effect: Allow
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AWS::Region
+            - Sid: AthenaQueryAccess
+              Effect: Allow
               Action:
                 - athena:StartQueryExecution
                 - athena:GetQueryExecution
                 - athena:GetQueryResults
-              Resource: '*'
+              Resource:
+                - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${ResourcePrefix}-*'
 
   EnforcementHandlerFunction:
     Type: AWS::Serverless::Function
@@ -365,15 +373,27 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref AuditLogTable
         - Statement:
-            - Effect: Allow
+            # IAM enforcement: scoped to roles tagged with bedrock-cost-tracker
+            # The enforcement handler only modifies roles that have the managed tag
+            - Sid: IAMEnforcement
+              Effect: Allow
               Action:
                 - iam:PutRolePolicy
                 - iam:DeleteRolePolicy
                 - iam:SimulatePrincipalPolicy
+              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+              Condition:
+                StringEquals:
+                  'iam:ResourceTag/bedrock-cost-tracker:managed': 'true'
+            - Sid: IAMListRoles
+              Effect: Allow
+              Action:
                 - iam:ListRoleTags
                 - iam:ListRoles
-              Resource: '*'
-            - Effect: Allow
+              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+            # Organizations: scoped to SERVICE_CONTROL_POLICY type only
+            - Sid: OrganizationsEnforcement
+              Effect: Allow
               Action:
                 - organizations:CreatePolicy
                 - organizations:AttachPolicy
@@ -381,6 +401,9 @@ Resources:
                 - organizations:DeletePolicy
                 - organizations:ListPolicies
               Resource: '*'
+              Condition:
+                StringEquals:
+                  'organizations:PolicyType': 'SERVICE_CONTROL_POLICY'
 
   NotificationSenderFunction:
     Type: AWS::Serverless::Function
@@ -455,18 +478,32 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref AuditLogTable
         - Statement:
-            - Effect: Allow
+            # IAM restore: scoped to roles tagged with bedrock-cost-tracker
+            - Sid: IAMRestore
+              Effect: Allow
               Action:
                 - iam:DeleteRolePolicy
+              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+              Condition:
+                StringEquals:
+                  'iam:ResourceTag/bedrock-cost-tracker:managed': 'true'
+            - Sid: IAMListRoles
+              Effect: Allow
+              Action:
                 - iam:ListRoleTags
                 - iam:ListRoles
-              Resource: '*'
-            - Effect: Allow
+              Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+            # Organizations: scoped to SERVICE_CONTROL_POLICY type only
+            - Sid: OrganizationsRestore
+              Effect: Allow
               Action:
                 - organizations:DetachPolicy
                 - organizations:DeletePolicy
                 - organizations:ListPolicies
               Resource: '*'
+              Condition:
+                StringEquals:
+                  'organizations:PolicyType': 'SERVICE_CONTROL_POLICY'
       Events:
         PostRestore:
           Type: HttpApi
@@ -490,17 +527,34 @@ Resources:
             TableName: !Ref BudgetsTable
         - CloudWatchPutMetricPolicy: {}
         - Statement:
-            - Effect: Allow
+            - Sid: AthenaQueryAccess
+              Effect: Allow
               Action:
                 - athena:StartQueryExecution
                 - athena:GetQueryExecution
                 - athena:GetQueryResults
-              Resource: '*'
-            - Effect: Allow
+              Resource:
+                - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${ResourcePrefix}-*'
+            # S3 read access scoped to CUR bucket prefix
+            - Sid: S3CURRead
+              Effect: Allow
               Action:
                 - s3:GetObject
                 - s3:GetBucketLocation
-              Resource: '*'
+              Resource:
+                - !Sub 'arn:aws:s3:::${ResourcePrefix}-*'
+                - !Sub 'arn:aws:s3:::${ResourcePrefix}-*/*'
+            # Glue catalog read for Athena queries
+            - Sid: GlueCatalogRead
+              Effect: Allow
+              Action:
+                - glue:GetDatabase
+                - glue:GetTable
+                - glue:GetPartitions
+              Resource:
+                - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${ResourcePrefix}_*'
+                - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}_*/*'
       Events:
         DailySchedule:
           Type: Schedule
@@ -519,17 +573,24 @@ Resources:
       Timeout: 120
       Policies:
         - Statement:
-            - Effect: Allow
+            # AWS Pricing API does not support resource-level permissions
+            # See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_awspricelist.html
+            - Sid: PricingAPIRead
+              Effect: Allow
               Action:
                 - pricing:GetProducts
                 - pricing:DescribeServices
               Resource: '*'
-            - Effect: Allow
+            # S3 access scoped to the pricing data prefix
+            - Sid: S3PricingData
+              Effect: Allow
               Action:
                 - s3:PutObject
                 - s3:GetObject
                 - s3:ListBucket
-              Resource: '*'
+              Resource:
+                - !Sub 'arn:aws:s3:::${ResourcePrefix}-*'
+                - !Sub 'arn:aws:s3:::${ResourcePrefix}-*/*'
       Events:
         WeeklySchedule:
           Type: Schedule
