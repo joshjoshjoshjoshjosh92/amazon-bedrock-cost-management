@@ -12,7 +12,7 @@ from typing import Any, Callable, TypeVar
 
 from bedrock_cost_tracker.client import TrackedClient
 from bedrock_cost_tracker.config import TrackerConfig
-from bedrock_cost_tracker.emitter import CloudWatchEmitter, MetricsEmitter, S3Emitter
+from bedrock_cost_tracker.emitter import CloudWatchEmitter, CompositeEmitter, MetricsEmitter, S3Emitter
 from bedrock_cost_tracker.pricing import PricingLookup
 
 logger = logging.getLogger(__name__)
@@ -159,12 +159,20 @@ class BedrockCostTracker:
                 retry_max_attempts=self.config.retry_max_attempts,
             )
         elif emit_to == "both":
-            # For "both", use CloudWatch as primary (S3 would need separate config)
-            # In a full implementation, this would use a composite emitter
-            return CloudWatchEmitter(
+            return CompositeEmitter(
+                emitters=[
+                    CloudWatchEmitter(
+                        buffer_size=self.config.buffer_size,
+                        retry_max_attempts=self.config.retry_max_attempts,
+                        metric_dimensions=self.config.metric_dimensions,
+                    ),
+                    S3Emitter(
+                        buffer_size=self.config.buffer_size,
+                        retry_max_attempts=self.config.retry_max_attempts,
+                    ),
+                ],
                 buffer_size=self.config.buffer_size,
                 retry_max_attempts=self.config.retry_max_attempts,
-                metric_dimensions=self.config.metric_dimensions,
             )
         else:
             # Fallback — should not happen due to config validation

@@ -43,6 +43,7 @@ class TrackedStreamIterator:
         pricing: PricingLookup,
         emitter: MetricsEmitter,
         api_method: str,
+        region: str = "us-east-1",
     ) -> None:
         self._stream_body = stream_body
         self._model_id = model_id
@@ -54,6 +55,7 @@ class TrackedStreamIterator:
         self._pricing = pricing
         self._emitter = emitter
         self._api_method = api_method
+        self._region = region
         self._completed = False
 
     def __iter__(self) -> "TrackedStreamIterator":
@@ -110,7 +112,6 @@ class TrackedStreamIterator:
                 self._pricing, self._model_id, self._input_tokens, self._output_tokens
             )
             tags = _build_tags(self._config)
-            region = _get_region(self._config)
 
             record = InvocationRecord(
                 request_id=self._request_id,
@@ -121,7 +122,7 @@ class TrackedStreamIterator:
                 timestamp=datetime.now(timezone.utc),
                 latency_ms=latency_ms,
                 account_id=self._config.account_id or "unknown",
-                region=region,
+                region=self._region,
                 tags=tags,
                 stream=True,
                 stream_interrupted=stream_interrupted,
@@ -152,6 +153,7 @@ class ConverseStreamIterator:
         config: TrackerConfig,
         pricing: PricingLookup,
         emitter: MetricsEmitter,
+        region: str = "us-east-1",
     ) -> None:
         self._stream_body = stream_body
         self._model_id = model_id
@@ -162,6 +164,7 @@ class ConverseStreamIterator:
         self._config = config
         self._pricing = pricing
         self._emitter = emitter
+        self._region = region
         self._completed = False
 
     def __iter__(self) -> "ConverseStreamIterator":
@@ -212,7 +215,6 @@ class ConverseStreamIterator:
                 self._pricing, self._model_id, self._input_tokens, self._output_tokens
             )
             tags = _build_tags(self._config)
-            region = _get_region(self._config)
 
             record = InvocationRecord(
                 request_id=self._request_id,
@@ -223,7 +225,7 @@ class ConverseStreamIterator:
                 timestamp=datetime.now(timezone.utc),
                 latency_ms=latency_ms,
                 account_id=self._config.account_id or "unknown",
-                region=region,
+                region=self._region,
                 tags=tags,
                 stream=True,
                 stream_interrupted=stream_interrupted,
@@ -265,6 +267,7 @@ class TrackedClient:
         self._config = config
         self._pricing = pricing
         self._emitter = emitter
+        self._region = _get_region_from_client(client, config)
 
     def __enter__(self) -> "TrackedClient":
         return self
@@ -323,6 +326,7 @@ class TrackedClient:
                     pricing=self._pricing,
                     emitter=self._emitter,
                     api_method="invoke_model_with_response_stream",
+                    region=self._region,
                 )
                 response["body"] = wrapped_body
         except Exception:
@@ -375,6 +379,7 @@ class TrackedClient:
                     config=self._config,
                     pricing=self._pricing,
                     emitter=self._emitter,
+                    region=self._region,
                 )
                 response["stream"] = wrapped_stream
         except Exception:
@@ -427,7 +432,6 @@ class TrackedClient:
 
         cost = _calculate_cost(self._pricing, model_id, input_tokens, output_tokens)
         tags = _build_tags(self._config)
-        region = _get_region(self._config)
 
         record = InvocationRecord(
             request_id=request_id,
@@ -438,7 +442,7 @@ class TrackedClient:
             timestamp=datetime.now(timezone.utc),
             latency_ms=latency_ms,
             account_id=self._config.account_id or "unknown",
-            region=region,
+            region=self._region,
             tags=tags,
             stream=False,
             stream_interrupted=False,
@@ -461,7 +465,6 @@ class TrackedClient:
 
         cost = _calculate_cost(self._pricing, model_id, input_tokens, output_tokens)
         tags = _build_tags(self._config)
-        region = _get_region(self._config)
 
         record = InvocationRecord(
             request_id=request_id,
@@ -472,7 +475,7 @@ class TrackedClient:
             timestamp=datetime.now(timezone.utc),
             latency_ms=latency_ms,
             account_id=self._config.account_id or "unknown",
-            region=region,
+            region=self._region,
             tags=tags,
             stream=False,
             stream_interrupted=False,
@@ -482,10 +485,11 @@ class TrackedClient:
 
 
 class _RereadableBody:
-    """A simple wrapper that allows re-reading response body bytes.
+    """A wrapper that allows re-reading response body bytes.
 
     After we read the body to extract token counts, we need to provide
-    the same bytes back to the caller.
+    the same bytes back to the caller. Implements the StreamingBody interface
+    so callers can use it as a drop-in replacement.
     """
 
     def __init__(self, data: Any) -> None:
@@ -495,9 +499,34 @@ class _RereadableBody:
             self._data = data.encode("utf-8")
         else:
             self._data = bytes(data) if data else b""
+        self._pos = 0
 
-    def read(self) -> bytes:
-        return self._data
+    def read(self, amt: Optional[int] = None) -> bytes:
+        if amt is None:
+            chunk = self._data[self._pos:]
+            self._pos = len(self._data)
+            return chunk
+        chunk = self._data[self._pos:self._pos + amt]
+        self._pos += len(chunk)
+        return chunk
+
+    def iter_lines(self, chunk_size: int = 1024) -> Iterator[bytes]:
+        for line in self._data.split(b"\n"):
+            if line:
+                yield line
+
+    def iter_chunks(self, chunk_size: int = 1024) -> Iterator[bytes]:
+        for i in range(0, len(self._data), chunk_size):
+            yield self._data[i:i + chunk_size]
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "_RereadableBody":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
 
     def __str__(self) -> str:
         return self._data.decode("utf-8")
@@ -537,8 +566,10 @@ def _build_tags(config: TrackerConfig) -> Dict[str, str]:
     return tags
 
 
-def _get_region(config: TrackerConfig) -> str:
-    """Get the AWS region from config or default."""
-    # Region is typically available from the boto3 client's meta
-    # but we don't have direct access here. Use a sensible default.
+def _get_region_from_client(client: Any, config: TrackerConfig) -> str:
+    """Extract the AWS region from the boto3 client, falling back to config/default."""
+    try:
+        return client.meta.region_name
+    except (AttributeError, TypeError):
+        pass
     return "us-east-1"

@@ -264,6 +264,8 @@ class CloudWatchEmitter(MetricsEmitter):
         self._namespace = namespace
         self._log_group = log_group
         self._metric_dimensions = metric_dimensions or ["ModelId", "Team"]
+        self._log_group_ensured = False
+        self._log_stream_tokens: Dict[str, Optional[str]] = {}
 
     def _do_emit(self, records: List[InvocationRecord]) -> None:
         """Emit records using CloudWatch PutMetricData with EMF."""
@@ -355,7 +357,12 @@ class CloudWatchEmitter(MetricsEmitter):
                 logger.debug("Could not create logs client for EMF emission")
                 return
 
+        self._ensure_log_group()
+
         for record in records:
+            stream_name = f"emf/{record.timestamp.strftime('%Y/%m/%d')}"
+            self._ensure_log_stream(stream_name)
+
             emf_entry = {
                 "_aws": {
                     "Timestamp": int(record.timestamp.timestamp() * 1000),
@@ -392,18 +399,54 @@ class CloudWatchEmitter(MetricsEmitter):
             }
 
             try:
-                self._logs_client.put_log_events(
-                    logGroupName=self._log_group,
-                    logStreamName=f"emf/{record.timestamp.strftime('%Y/%m/%d')}",
-                    logEvents=[
+                put_kwargs: Dict[str, Any] = {
+                    "logGroupName": self._log_group,
+                    "logStreamName": stream_name,
+                    "logEvents": [
                         {
                             "timestamp": int(record.timestamp.timestamp() * 1000),
                             "message": json.dumps(emf_entry, default=str),
                         }
                     ],
+                }
+                seq_token = self._log_stream_tokens.get(stream_name)
+                if seq_token:
+                    put_kwargs["sequenceToken"] = seq_token
+
+                response = self._logs_client.put_log_events(**put_kwargs)
+                self._log_stream_tokens[stream_name] = response.get(
+                    "nextSequenceToken"
                 )
             except Exception:
                 logger.debug("Failed to emit EMF log entry", exc_info=True)
+
+    def _ensure_log_group(self) -> None:
+        """Create the log group if it doesn't exist (idempotent)."""
+        if self._log_group_ensured:
+            return
+        try:
+            self._logs_client.create_log_group(logGroupName=self._log_group)
+        except self._logs_client.exceptions.ResourceAlreadyExistsException:
+            pass
+        except Exception:
+            logger.debug("Failed to create log group %s", self._log_group, exc_info=True)
+        self._log_group_ensured = True
+
+    def _ensure_log_stream(self, stream_name: str) -> None:
+        """Create a log stream if it doesn't exist (idempotent)."""
+        if stream_name in self._log_stream_tokens:
+            return
+        try:
+            self._logs_client.create_log_stream(
+                logGroupName=self._log_group, logStreamName=stream_name
+            )
+        except self._logs_client.exceptions.ResourceAlreadyExistsException:
+            pass
+        except Exception:
+            logger.debug(
+                "Failed to create log stream %s", stream_name, exc_info=True
+            )
+        self._log_stream_tokens[stream_name] = None
 
     def _emit_buffer_overflow_warning(self) -> None:
         """Emit BufferOverflow warning as a CloudWatch metric."""
@@ -492,3 +535,43 @@ class S3Emitter(MetricsEmitter):
     def _emit_buffer_overflow_warning(self) -> None:
         """Log buffer overflow warning for S3 emitter."""
         logger.warning("S3Emitter: BufferOverflow — oldest events dropped")
+
+
+class CompositeEmitter(MetricsEmitter):
+    """Fans out metrics to multiple emitters.
+
+    Each emit/flush is forwarded to all child emitters. Failures in one
+    emitter do not affect the others.
+    """
+
+    def __init__(self, emitters: List[MetricsEmitter], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._emitters = emitters
+
+    def emit(self, record: InvocationRecord) -> None:
+        """Forward record to all child emitters."""
+        for emitter in self._emitters:
+            try:
+                emitter.emit(record)
+            except Exception:
+                logger.debug(
+                    "CompositeEmitter: child emitter %s failed on emit",
+                    type(emitter).__name__,
+                    exc_info=True,
+                )
+
+    def flush(self) -> None:
+        """Flush all child emitters."""
+        for emitter in self._emitters:
+            try:
+                emitter.flush()
+            except Exception:
+                logger.debug(
+                    "CompositeEmitter: child emitter %s failed on flush",
+                    type(emitter).__name__,
+                    exc_info=True,
+                )
+
+    def _do_emit(self, records: List[InvocationRecord]) -> None:
+        """Not used directly — emit/flush are overridden."""
+        pass
