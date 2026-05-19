@@ -71,11 +71,11 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref BedrockInvocationLogGroup
-      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.inputTokenCount = * }'
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.input.inputTokenCount = * }'
       MetricTransformations:
         - MetricNamespace: BedrockCostTracker
           MetricName: InputTokenCount
-          MetricValue: $.inputTokenCount
+          MetricValue: $.input.inputTokenCount
           Dimensions:
             - Key: ModelId
               Value: $.modelId
@@ -86,11 +86,11 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref BedrockInvocationLogGroup
-      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.outputTokenCount = * }'
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.output.outputTokenCount = * }'
       MetricTransformations:
         - MetricNamespace: BedrockCostTracker
           MetricName: OutputTokenCount
-          MetricValue: $.outputTokenCount
+          MetricValue: $.output.outputTokenCount
           Dimensions:
             - Key: ModelId
               Value: $.modelId
@@ -111,11 +111,11 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref BedrockInvocationLogGroup
-      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.latencyMs = * }'
+      FilterPattern: '{ $.schemaType = "ModelInvocationLog" && $.output.outputBodyJson.metrics.latencyMs = * }'
       MetricTransformations:
         - MetricNamespace: BedrockCostTracker
           MetricName: Latency
-          MetricValue: $.latencyMs
+          MetricValue: $.output.outputBodyJson.metrics.latencyMs
           Dimensions:
             - Key: ModelId
               Value: $.modelId
