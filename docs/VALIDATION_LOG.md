@@ -104,3 +104,21 @@ aws bedrock delete-model-invocation-logging-configuration --region us-east-1
 ## Conclusion
 
 The solution deploys cleanly, enables logging automatically, and produces real-time metrics in the CloudWatch dashboard within minutes of Bedrock invocations. The one-click deploy experience (`./deploy.sh --email ...`) handles all setup including IAM role provisioning and logging enablement.
+
+### Key Discovery: Use Native AWS/Bedrock Metrics
+
+CloudWatch metric filters **cannot extract numeric values from nested JSON paths** (e.g., `$.input.inputTokenCount`). The filter pattern matches log events, but `MetricValue` extraction silently fails for nested paths.
+
+**Solution:** The dashboard uses the native `AWS/Bedrock` namespace metrics that AWS provides automatically for every Bedrock invocation. These require zero configuration and are available immediately:
+- `AWS/Bedrock/Invocations`
+- `AWS/Bedrock/InputTokenCount`
+- `AWS/Bedrock/OutputTokenCount`
+- `AWS/Bedrock/InvocationLatency`
+- `AWS/Bedrock/InvocationClientErrors`
+- `AWS/Bedrock/InvocationThrottles`
+
+The custom `BedrockCostTracker` namespace is reserved for SDK wrapper team/application attribution metrics (emitted via direct `PutMetricData`).
+
+### Total Invocations During Testing
+
+50+ invocations across Claude Sonnet 4.6 and Claude Haiku 4.5, generating ~8,500 tokens total. Dashboard confirmed showing multi-model breakdown, latency percentiles, and invocation counts.
