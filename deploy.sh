@@ -128,19 +128,41 @@ echo ""
 echo "  ✓ Deployment complete"
 echo ""
 
-# ─── Step 3: Install SDK Wrapper ──────────────────────────────────────────────
+# ─── Step 3: Enable Bedrock Model Invocation Logging ─────────────────────────
+echo "── Step 3/5: Enabling Bedrock model invocation logging ───────────────────"
+
+LOG_GROUP=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?contains(OutputKey,'LogGroupName')].OutputValue" --output text 2>/dev/null || echo "")
+LOGGING_ROLE=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?contains(OutputKey,'LoggingRoleArn')].OutputValue" --output text 2>/dev/null || echo "")
+
+if [ -n "$LOG_GROUP" ] && [ -n "$LOGGING_ROLE" ]; then
+  aws bedrock put-model-invocation-logging-configuration --region "$REGION" \
+    --logging-config "{
+      \"cloudWatchConfig\": {
+        \"logGroupName\": \"$LOG_GROUP\",
+        \"roleArn\": \"$LOGGING_ROLE\"
+      },
+      \"textDataDeliveryEnabled\": true,
+      \"imageDataDeliveryEnabled\": false,
+      \"embeddingDataDeliveryEnabled\": false
+    }" 2>/dev/null && echo "  ✓ Bedrock invocation logging enabled → $LOG_GROUP" || echo "  ⚠ Could not enable logging (may need manual setup)"
+else
+  echo "  ⚠ Could not determine log group or role ARN. Enable logging manually in Bedrock console."
+fi
+echo ""
+
+# ─── Step 4: Install SDK Wrapper ──────────────────────────────────────────────
 if [ "$SKIP_WRAPPER" = false ]; then
-  echo "── Step 3/4: Installing SDK wrapper ────────────────────────────────────"
+  echo "── Step 4/5: Installing SDK wrapper ────────────────────────────────────"
   pip install ./sdk-wrapper --quiet 2>/dev/null || pip install ./sdk-wrapper
   echo "  ✓ SDK wrapper installed (bedrock_cost_tracker)"
   echo ""
 else
-  echo "── Step 3/4: Skipping SDK wrapper (--skip-wrapper) ─────────────────────"
+  echo "── Step 4/5: Skipping SDK wrapper (--skip-wrapper) ─────────────────────"
   echo ""
 fi
 
-# ─── Step 4: Verify ──────────────────────────────────────────────────────────
-echo "── Step 4/4: Verifying deployment ────────────────────────────────────────"
+# ─── Step 5: Verify ──────────────────────────────────────────────────────────
+echo "── Step 5/5: Verifying deployment ────────────────────────────────────────"
 
 # Check stack status
 STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "NOT_FOUND")

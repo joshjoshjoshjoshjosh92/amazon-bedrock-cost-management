@@ -44,6 +44,43 @@ Parameters:
 Resources:
 
   # --------------------------------------------------------------------------
+  # IAM Role for Bedrock Model Invocation Logging
+  # --------------------------------------------------------------------------
+  BedrockLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}-bedrock-logging-role"
+      Description: Allows Amazon Bedrock to write model invocation logs to CloudWatch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: bedrock-cloudwatch-logging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/${ResourcePrefix}-model-invocations:*"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Application
+          Value: !Ref ResourcePrefix
+
+  # --------------------------------------------------------------------------
   # CloudWatch Log Group for Bedrock Model Invocation Logs
   # --------------------------------------------------------------------------
   BedrockInvocationLogGroup:
@@ -588,9 +625,17 @@ Outputs:
     Description: ARN of the CloudWatch Log Group
     Value: !GetAtt BedrockInvocationLogGroup.Arn
 
+  BedrockLoggingRoleArn:
+    Description: IAM Role ARN for Bedrock model invocation logging
+    Value: !GetAtt BedrockLoggingRole.Arn
+
   DashboardName:
     Description: CloudWatch Dashboard name
     Value: !Ref BedrockCostDashboard
+
+  DashboardUrl:
+    Description: Direct URL to the CloudWatch Dashboard
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ResourcePrefix}-${EnvironmentName}"
 
   AlarmTopicArn:
     Description: SNS Topic ARN for alarm notifications
