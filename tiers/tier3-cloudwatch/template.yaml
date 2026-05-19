@@ -293,7 +293,7 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InvocationCount", {"stat": "Sum", "label": "Total Invocations"}]
+                  ["AWS/Bedrock", "Invocations", {"stat": "Sum", "label": "Total Invocations"}]
                 ],
                 "view": "singleValue",
                 "region": "${AWS::Region}",
@@ -310,8 +310,8 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InputTokenCount", {"stat": "Sum", "label": "Input"}],
-                  ["BedrockCostTracker", "OutputTokenCount", {"stat": "Sum", "label": "Output"}]
+                  ["AWS/Bedrock", "InputTokenCount", {"stat": "Sum", "label": "Input"}],
+                  ["AWS/Bedrock", "OutputTokenCount", {"stat": "Sum", "label": "Output"}]
                 ],
                 "view": "singleValue",
                 "region": "${AWS::Region}",
@@ -328,7 +328,7 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InvocationCount", {"stat": "Sum", "label": "This Week"}]
+                  ["AWS/Bedrock", "Invocations", {"stat": "Sum", "label": "This Week"}]
                 ],
                 "view": "singleValue",
                 "region": "${AWS::Region}",
@@ -345,8 +345,8 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "ErrorCount", {"stat": "Sum", "label": "Errors"}],
-                  ["BedrockCostTracker", "ThrottleCount", {"stat": "Sum", "label": "Throttles"}]
+                  ["AWS/Bedrock", "InvocationClientErrors", {"stat": "Sum", "label": "Errors"}],
+                  ["AWS/Bedrock", "InvocationThrottles", {"stat": "Sum", "label": "Throttles"}]
                 ],
                 "view": "singleValue",
                 "region": "${AWS::Region}",
@@ -363,20 +363,15 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InputTokenCount", {"stat": "Sum", "label": "Input Tokens"}],
-                  ["BedrockCostTracker", "OutputTokenCount", {"stat": "Sum", "label": "Output Tokens"}]
+                  ["AWS/Bedrock", "InputTokenCount", {"stat": "Sum", "label": "Input Tokens"}],
+                  ["AWS/Bedrock", "OutputTokenCount", {"stat": "Sum", "label": "Output Tokens"}]
                 ],
                 "view": "timeSeries",
                 "stacked": true,
                 "region": "${AWS::Region}",
                 "title": "📈 Token Consumption Trend (Hourly)",
                 "period": 3600,
-                "yAxis": {"left": {"label": "Tokens", "showUnits": false}},
-                "annotations": {
-                  "horizontal": [
-                    {"label": "Daily Budget (tokens)", "value": ${TokenAlarmThreshold}, "color": "#d13212"}
-                  ]
-                }
+                "yAxis": {"left": {"label": "Tokens", "showUnits": false}}
               }
             },
             {
@@ -397,10 +392,9 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InputTokenCount", "ModelId", "anthropic.claude-3-sonnet-20240229-v1:0", {"stat": "Sum", "label": "Claude 3 Sonnet"}],
-                  ["BedrockCostTracker", "InputTokenCount", "ModelId", "anthropic.claude-3-haiku-20240307-v1:0", {"stat": "Sum", "label": "Claude 3 Haiku"}],
-                  ["BedrockCostTracker", "InputTokenCount", "ModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0", {"stat": "Sum", "label": "Claude 3.5 Sonnet"}],
-                  ["BedrockCostTracker", "InputTokenCount", "ModelId", "us.anthropic.claude-sonnet-4-20250514-v1:0", {"stat": "Sum", "label": "Claude Sonnet 4"}]
+                  ["AWS/Bedrock", "InputTokenCount", "ModelId", "us.anthropic.claude-sonnet-4-6", {"stat": "Sum", "label": "Claude Sonnet 4.6"}],
+                  ["AWS/Bedrock", "InputTokenCount", "ModelId", "us.anthropic.claude-haiku-4-5-20251001-v1:0", {"stat": "Sum", "label": "Claude Haiku 4.5"}],
+                  ["AWS/Bedrock", "InputTokenCount", "ModelId", "us.anthropic.claude-sonnet-4-20250514-v1:0", {"stat": "Sum", "label": "Claude Sonnet 4"}]
                 ],
                 "view": "timeSeries",
                 "stacked": true,
@@ -451,10 +445,9 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InvocationCount", "ModelId", "anthropic.claude-3-sonnet-20240229-v1:0", {"stat": "Sum", "label": "Sonnet"}],
-                  ["BedrockCostTracker", "InvocationCount", "ModelId", "anthropic.claude-3-haiku-20240307-v1:0", {"stat": "Sum", "label": "Haiku"}],
-                  ["BedrockCostTracker", "InvocationCount", "ModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0", {"stat": "Sum", "label": "3.5 Sonnet"}],
-                  ["BedrockCostTracker", "InvocationCount", "ModelId", "us.anthropic.claude-sonnet-4-20250514-v1:0", {"stat": "Sum", "label": "Sonnet 4"}]
+                  ["AWS/Bedrock", "Invocations", "ModelId", "us.anthropic.claude-sonnet-4-6", {"stat": "Sum", "label": "Sonnet 4.6"}],
+                  ["AWS/Bedrock", "Invocations", "ModelId", "us.anthropic.claude-haiku-4-5-20251001-v1:0", {"stat": "Sum", "label": "Haiku 4.5"}],
+                  ["AWS/Bedrock", "Invocations", "ModelId", "us.anthropic.claude-sonnet-4-20250514-v1:0", {"stat": "Sum", "label": "Sonnet 4"}]
                 ],
                 "view": "bar",
                 "region": "${AWS::Region}",
@@ -481,10 +474,10 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "Latency", {"stat": "Average", "label": "Avg Latency"}],
-                  ["BedrockCostTracker", "Latency", {"stat": "p50", "label": "p50"}],
-                  ["BedrockCostTracker", "Latency", {"stat": "p90", "label": "p90"}],
-                  ["BedrockCostTracker", "Latency", {"stat": "p99", "label": "p99"}]
+                  ["AWS/Bedrock", "InvocationLatency", {"stat": "Average", "label": "Avg Latency"}],
+                  ["AWS/Bedrock", "InvocationLatency", {"stat": "p50", "label": "p50"}],
+                  ["AWS/Bedrock", "InvocationLatency", {"stat": "p90", "label": "p90"}],
+                  ["AWS/Bedrock", "InvocationLatency", {"stat": "p99", "label": "p99"}]
                 ],
                 "view": "timeSeries",
                 "stacked": false,
@@ -502,8 +495,9 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "ErrorCount", {"stat": "Sum", "label": "Errors", "color": "#d13212"}],
-                  ["BedrockCostTracker", "ThrottleCount", {"stat": "Sum", "label": "Throttles", "color": "#ff9900"}]
+                  ["AWS/Bedrock", "InvocationClientErrors", {"stat": "Sum", "label": "Client Errors", "color": "#d13212"}],
+                  ["AWS/Bedrock", "InvocationThrottles", {"stat": "Sum", "label": "Throttles", "color": "#ff9900"}],
+                  ["AWS/Bedrock", "InvocationServerErrors", {"stat": "Sum", "label": "Server Errors", "color": "#7b2cf5"}]
                 ],
                 "view": "timeSeries",
                 "stacked": false,
@@ -521,7 +515,7 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "Latency", {"stat": "Average", "label": "Avg Latency (ms)"}]
+                  ["AWS/Bedrock", "InvocationLatency", {"stat": "Average", "label": "Avg Latency (ms)"}]
                 ],
                 "view": "gauge",
                 "region": "${AWS::Region}",
@@ -538,7 +532,7 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "InvocationCount", {"stat": "Sum", "label": "Requests/5min"}]
+                  ["AWS/Bedrock", "Invocations", {"stat": "Sum", "label": "Requests/5min"}]
                 ],
                 "view": "gauge",
                 "region": "${AWS::Region}",
@@ -555,7 +549,7 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  ["BedrockCostTracker", "ErrorCount", {"stat": "Sum", "label": "Errors/5min"}]
+                  ["AWS/Bedrock", "InvocationClientErrors", {"stat": "Sum", "label": "Errors/5min"}]
                 ],
                 "view": "gauge",
                 "region": "${AWS::Region}",
