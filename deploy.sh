@@ -104,7 +104,26 @@ echo "  ✓ Build complete"
 echo ""
 
 # ─── Step 2: Deploy ───────────────────────────────────────────────────────────
-echo "── Step 2/4: Deploying to AWS ────────────────────────────────────────"
+echo "── Step 2/5: Deploying to AWS ────────────────────────────────────────"
+
+# Ensure the Bedrock logging role exists (created outside CloudFormation to avoid conflicts)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ROLE_NAME="${PREFIX}-bedrock-logging-role"
+LOG_GROUP_NAME="/aws/bedrock/${PREFIX}-model-invocations"
+
+if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+  echo "  Creating Bedrock logging IAM role..."
+  aws iam create-role --role-name "$ROLE_NAME" \
+    --assume-role-policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"bedrock.amazonaws.com\"},\"Action\":\"sts:AssumeRole\",\"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"$ACCOUNT_ID\"},\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:bedrock:$REGION:$ACCOUNT_ID:*\"}}}]}" \
+    --description "Allows Bedrock to write model invocation logs to CloudWatch" >/dev/null 2>&1
+  aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name bedrock-logging-policy \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],\"Resource\":\"arn:aws:logs:$REGION:$ACCOUNT_ID:log-group:$LOG_GROUP_NAME:*\"}]}" >/dev/null 2>&1
+  echo "  ✓ Logging role created: $ROLE_NAME"
+  sleep 10
+else
+  echo "  ✓ Logging role exists: $ROLE_NAME"
+fi
+
 echo "  Deploying stack: $STACK_NAME"
 echo "  (This may take 3-5 minutes on first deploy)"
 echo ""

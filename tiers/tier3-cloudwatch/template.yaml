@@ -44,41 +44,11 @@ Parameters:
 Resources:
 
   # --------------------------------------------------------------------------
-  # IAM Role for Bedrock Model Invocation Logging
+  # Bedrock Model Invocation Logging Role
+  # NOTE: This role is created outside CloudFormation (by deploy.sh or manually)
+  # to avoid conflicts. The deploy script enables logging using this role ARN.
+  # Role name: ${ResourcePrefix}-bedrock-logging-role
   # --------------------------------------------------------------------------
-  BedrockLoggingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${ResourcePrefix}-bedrock-logging-role"
-      Description: Allows Amazon Bedrock to write model invocation logs to CloudWatch
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: bedrock.amazonaws.com
-            Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
-      Policies:
-        - PolicyName: bedrock-cloudwatch-logging
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/${ResourcePrefix}-model-invocations:*"
-      Tags:
-        - Key: Environment
-          Value: !Ref EnvironmentName
-        - Key: Application
-          Value: !Ref ResourcePrefix
 
   # --------------------------------------------------------------------------
   # CloudWatch Log Group for Bedrock Model Invocation Logs
@@ -627,7 +597,7 @@ Outputs:
 
   BedrockLoggingRoleArn:
     Description: IAM Role ARN for Bedrock model invocation logging
-    Value: !GetAtt BedrockLoggingRole.Arn
+    Value: !Sub "arn:aws:iam::${AWS::AccountId}:role/${ResourcePrefix}-bedrock-logging-role"
 
   DashboardName:
     Description: CloudWatch Dashboard name
